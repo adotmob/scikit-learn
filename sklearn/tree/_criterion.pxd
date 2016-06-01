@@ -40,6 +40,9 @@ cdef class Criterion:
     cdef double weighted_n_left          # Weighted number of samples in the left node
     cdef double weighted_n_right         # Weighted number of samples in the right node
 
+    cdef double compteur
+    cdef double  compteur_left
+    cdef double  compteur_right
     cdef double* sum_total          # For classification criteria, the sum of the
                                     # weighted count of each label. For regression,
                                     # the sum of w*y. sum_total[k] is equal to
@@ -48,6 +51,12 @@ cdef class Criterion:
     cdef double* sum_left           # Same as above, but for the left side of the split
     cdef double* sum_right          # same as above, but for the right side of the split
 
+    cdef double* sum_right_y          # same as above, but for the right side of the split  
+
+    cdef double* sum_left_y           # Same as above, but for the left side of the split
+    
+    cdef double* sum_total_y
+    
     # The criterion object is maintained such that left and right collected
     # statistics correspond to samples[start:pos] and samples[pos:end].
 

@@ -278,7 +278,7 @@ def setup_package():
             if not os.path.exists(os.path.join(cwd, 'PKG-INFO')):
                 # Generate Cython sources, unless building from source release
                 generate_cython()
-
+                
             # Clean left-over .so file
             for dirpath, dirnames, filenames in os.walk(
                     os.path.join(cwd, 'sklearn')):

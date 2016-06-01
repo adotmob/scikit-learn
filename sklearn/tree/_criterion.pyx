@@ -42,6 +42,10 @@ cdef class Criterion:
         free(self.sum_left)
         free(self.sum_right)
 
+        free(self.sum_total_y)
+        free(self.sum_left_y)
+        free(self.sum_right_y)
+
     def __getstate__(self):
         return {}
 
@@ -73,7 +77,7 @@ cdef class Criterion:
             The last sample used on this node
 
         """
-
+        
         pass
 
     cdef void reset(self) nogil:
@@ -887,7 +891,7 @@ cdef class MSE(RegressionCriterion):
         for k in range(self.n_outputs):
             impurity -= (sum_total[k] / self.weighted_n_node_samples)**2.0
 
-        return impurity / self.n_outputs
+        return impurity/self.n_outputs
 
     cdef double proxy_impurity_improvement(self) nogil:
         """Compute a proxy of the impurity reduction
@@ -1021,3 +1025,347 @@ cdef class FriedmanMSE(MSE):
 
         return (diff * diff / (self.weighted_n_left * self.weighted_n_right * 
                                self.weighted_n_node_samples))
+
+#################################################
+
+cdef class AdotRegressionCriterion(Criterion):
+
+    """Abstract regression criterion.
+
+    This handles cases where the target is a continuous value, and is
+    evaluated by computing the variance of the target values left and right
+    of the split point. The computation takes linear time with `n_samples`
+    by using ::
+
+        var = \sum_i^n (y_i - y_bar) ** 2
+            = (\sum_i^n y_i ** 2) - 2frac{(\sum_i^n (w_i*y_i) * \sum_i^n(y_i))}
+            {\sum_i^n w_i} + \frac{N*\sum_i^n (w_i*y_i)**2}{(\sum_i^n w_i)**2}
+
+        y_bar= \frac{\sum_i^n (y_i* w_i)} {sum_i (w_i)}  
+    """
+
+    cdef double sq_sum_total
+
+    def __cinit__(self, SIZE_t n_outputs):
+        """Initialize parameters for this criterion.
+
+        Parameters
+        ----------
+        n_outputs: SIZE_t
+            The number of targets to be predicted
+        """
+
+        # Default values
+        self.y = NULL
+        self.y_stride = 0
+        self.sample_weight = NULL
+
+        self.samples = NULL
+        self.start = 0
+        self.pos = 0
+        self.end = 0
+
+        self.n_outputs = n_outputs
+        self.n_node_samples = 0
+        self.weighted_n_node_samples = 0.0
+        self.weighted_n_left = 0.0
+        self.weighted_n_right = 0.0
+        self.compteur=0.0
+        self.compteur_left=0.0
+        self.compteur_right=0.0
+        self.sq_sum_total = 0.0
+
+        # Allocate accumulators. Make sure they are NULL, not uninitialized,
+        # before an exception can be raised (which triggers __dealloc__).
+
+        self.sum_total = NULL
+        self.sum_left = NULL
+        self.sum_right = NULL
+
+        self.sum_total_y = NULL
+        self.sum_left_y = NULL
+        self.sum_right_y = NULL
+        
+        
+        # Allocate memory for the accumulators
+        self.sum_total = <double*> calloc(n_outputs, sizeof(double))
+        self.sum_left = <double*> calloc(n_outputs, sizeof(double))
+        self.sum_right = <double*> calloc(n_outputs, sizeof(double))
+
+        self.sum_total_y = <double*> calloc(n_outputs, sizeof(double))
+        self.sum_left_y =  <double*> calloc(n_outputs, sizeof(double))
+        self.sum_right_y = <double*> calloc(n_outputs, sizeof(double))
+
+        if (self.sum_total == NULL or 
+                self.sum_left == NULL or
+                self.sum_right == NULL):
+            raise MemoryError()
+
+        if (self.sum_total_y == NULL or 
+                self.sum_left_y == NULL or
+                self.sum_right_y == NULL):
+            raise MemoryError()    
+
+    def __reduce__(self):
+        return (AdotRegressionCriterion, (self.n_outputs,), self.__getstate__())
+
+
+    cdef void init(self, DOUBLE_t* y, SIZE_t y_stride, DOUBLE_t* sample_weight,
+                   double weighted_n_samples, SIZE_t* samples, SIZE_t start,
+                   SIZE_t end) nogil:
+        """Initialize the criterion at node samples[start:end] and
+           children samples[start:start] and samples[start:end]."""
+        # Initialize fields
+        self.y = y
+        self.y_stride = y_stride
+        self.sample_weight = sample_weight
+        self.samples = samples
+        self.start = start
+        self.end = end
+        self.n_node_samples = end - start
+        self.weighted_n_samples = weighted_n_samples
+        self.weighted_n_node_samples = 0.
+        self.compteur=0.
+
+        cdef SIZE_t i
+        cdef SIZE_t p
+        cdef SIZE_t k
+        cdef DOUBLE_t y_ik
+        cdef DOUBLE_t w_y_ik
+        cdef DOUBLE_t w = 1.0
+        cdef DOUBLE_t compteur=1.0
+        self.sq_sum_total = 0.0
+        memset(self.sum_total, 0, self.n_outputs * sizeof(double))
+        memset(self.sum_total_y, 0, self.n_outputs * sizeof(double))
+
+        for p in range(start, end):
+            i = samples[p]
+
+            if sample_weight != NULL:
+                w = sample_weight[i]
+
+            for k in range(self.n_outputs):
+                y_ik = y[i * y_stride + k]
+                w_y_ik = w * y_ik
+                self.sum_total[k] += w_y_ik
+                self.sum_total_y[k]+=y_ik 
+                self.sq_sum_total += y_ik**2
+            
+            compteur +=1.0
+            self.weighted_n_node_samples += w
+
+        # Reset to pos=start
+        self.reset()
+
+    cdef void reset(self) nogil:
+        """Reset the criterion at pos=start."""
+        cdef SIZE_t n_bytes = self.n_outputs * sizeof(double)
+        memset(self.sum_left, 0, n_bytes)
+        memcpy(self.sum_right, self.sum_total, n_bytes)
+
+        memset(self.sum_left_y, 0, n_bytes)
+        memcpy(self.sum_right_y, self.sum_total_y, n_bytes)
+
+        self.weighted_n_left = 0.0
+        self.weighted_n_right = self.weighted_n_node_samples
+        self.compteur_left=0.0
+        self.compteur_right=self.compteur
+        self.pos = self.start
+
+    cdef void reverse_reset(self) nogil:
+        """Reset the criterion at pos=end."""
+        cdef SIZE_t n_bytes = self.n_outputs * sizeof(double)
+        memset(self.sum_right, 0, n_bytes)
+        memcpy(self.sum_left, self.sum_total, n_bytes)
+
+        memset(self.sum_right_y, 0, n_bytes)
+        memcpy(self.sum_left_y, self.sum_total_y, n_bytes)
+
+        self.weighted_n_right = 0.0
+        self.weighted_n_left = self.weighted_n_node_samples
+        self.compteur_right=0.0
+        self.compteur_left=self.compteur
+        self.pos = self.end
+
+    cdef void update(self, SIZE_t new_pos) nogil:
+        """Updated statistics by moving samples[pos:new_pos] to the left."""
+
+        cdef double* sum_left = self.sum_left
+        cdef double* sum_right = self.sum_right
+        cdef double* sum_total = self.sum_total
+
+        cdef double* sum_left_y = self.sum_left_y
+        cdef double* sum_right_y = self.sum_right_y
+        cdef double* sum_total_y = self.sum_total_y
+
+        cdef double* sample_weight = self.sample_weight
+        cdef SIZE_t* samples = self.samples
+
+        cdef DOUBLE_t* y = self.y
+        cdef SIZE_t pos = self.pos
+        cdef SIZE_t end = self.end
+        cdef SIZE_t i
+        cdef SIZE_t p
+        cdef SIZE_t k
+        cdef DOUBLE_t w = 1.0
+        cdef DOUBLE_t y_ik
+
+        # Update statistics up to new_pos
+        #
+        # Given that
+        #           sum_left[x] +  sum_right[x] = sum_total[x]
+        # and that sum_total is known, we are going to update
+        # sum_left from the direction that require the least amount
+        # of computations, i.e. from pos to new_pos or from end to new_po.
+
+        if (new_pos - pos) <= (end - new_pos):
+            for p in range(pos, new_pos):
+                i = samples[p]
+
+                if sample_weight != NULL:
+                    w = sample_weight[i]
+
+                for k in range(self.n_outputs):
+                    y_ik = y[i * self.y_stride + k]
+                    sum_left[k] += w * y_ik
+                    sum_left_y[k] += y_ik
+
+                self.weighted_n_left += w
+                self.compteur_left +=1
+        else:
+            self.reverse_reset()
+
+            for p in range(end - 1, new_pos - 1, -1):
+                i = samples[p]
+
+                if sample_weight != NULL:
+                    w = sample_weight[i]
+
+                for k in range(self.n_outputs):
+                    y_ik = y[i * self.y_stride + k]
+                    sum_left[k] -= w * y_ik
+                    sum_left_y[k] -= y_ik
+
+                self.weighted_n_left -= w
+                self.compteur_left -=1
+
+        self.weighted_n_right = (self.weighted_n_node_samples - 
+                                 self.weighted_n_left)
+        self.compteur_right=self.compteur-  self.compteur_left
+                                 
+        for k in range(self.n_outputs):
+            sum_right[k] = sum_total[k] - sum_left[k]
+            sum_right_y[k] = sum_total_y[k] - sum_left_y[k]
+
+        self.pos = new_pos
+
+    cdef double node_impurity(self) nogil:
+        pass
+
+    cdef void children_impurity(self, double* impurity_left,
+                                double* impurity_right) nogil:
+        pass
+
+    cdef void node_value(self, double* dest) nogil:
+        """Compute the node value of samples[start:end] into dest."""
+
+        cdef SIZE_t k
+
+        for k in range(self.n_outputs):
+            dest[k] = self.sum_total[k] / self.weighted_n_node_samples
+
+
+cdef class AdotMSE(AdotRegressionCriterion):
+    """Mean squared error impurity criterion.
+
+        MSE = var_left + var_right
+    """
+    cdef double node_impurity(self) nogil:
+        """Evaluate the impurity of the current node, i.e. the impurity of
+           samples[start:end]."""
+
+        cdef double* sum_total = self.sum_total
+        cdef double* sum_total_y = self.sum_total_y
+        #cdef double weighted_n_node_samples= self.weighted_n_node_samples
+        cdef double impurity
+        cdef SIZE_t k
+
+        impurity = self.sq_sum_total 
+        for k in range(self.n_outputs):
+            impurity -= 2*(sum_total[k]*sum_total_y[k] ) /self.weighted_n_node_samples
+            impurity+=(self.compteur*sum_total[k]**2)/self.weighted_n_node_samples**2
+
+        return impurity/self.n_outputs
+
+    cdef double proxy_impurity_improvement(self) nogil:
+        """Compute a proxy of the impurity reduction
+
+        This method is used to speed up the search for the best split.
+        It is a proxy quantity such that the split that maximizes this value
+        also maximizes the impurity improvement. It neglects all constant terms
+        of the impurity decrease for a given split.
+
+        The absolute impurity improvement is only computed by the
+        impurity_improvement method once the best split has been found.
+        """
+
+        cdef double impurity_left
+        cdef double impurity_right
+        self.children_impurity(&impurity_left, &impurity_right)
+
+        return (- impurity_right- impurity_left)
+
+    cdef void children_impurity(self, double* impurity_left,
+                                double* impurity_right) nogil:
+        """Evaluate the impurity in children nodes, i.e. the impurity of the
+           left child (samples[start:pos]) and the impurity the right child
+           (samples[pos:end])."""
+
+
+        cdef DOUBLE_t* y = self.y
+        cdef DOUBLE_t* sample_weight = self.sample_weight
+        cdef SIZE_t* samples = self.samples
+        cdef SIZE_t pos = self.pos
+        cdef SIZE_t start = self.start
+
+        cdef double* sum_left = self.sum_left
+        cdef double* sum_right = self.sum_right
+
+        cdef double* sum_left_y = self.sum_left_y
+        cdef double* sum_right_y = self.sum_right_y
+
+        cdef double sq_sum_left = 0.0
+        cdef double sq_sum_right
+
+        cdef SIZE_t i
+        cdef SIZE_t p
+        cdef SIZE_t k
+        cdef DOUBLE_t w = 1.0
+        cdef DOUBLE_t y_ik
+
+        for p in range(start, pos):
+            i = samples[p]
+
+            if sample_weight != NULL:
+                w = sample_weight[i]
+
+            for k in range(self.n_outputs):
+                y_ik = y[i * self.y_stride + k]
+                sq_sum_left += w * y_ik * y_ik
+
+        sq_sum_right = self.sq_sum_total - sq_sum_left
+
+        impurity_left[0] = sq_sum_left 
+        impurity_right[0] = sq_sum_right 
+
+        for k in range(self.n_outputs):
+            impurity_left[0] -= 2*sum_left[k]*sum_left_y [k]/self.weighted_n_left
+            impurity_left[0] +=(self.compteur_left *sum_left[k]**2)/self.weighted_n_left**2
+
+            impurity_right[0] -= 2*sum_right[k]*sum_right_y [k]/self.weighted_n_right
+            impurity_right[0]+=(self.compteur_right *sum_right[k]**2)/self.weighted_n_right**2
+
+        impurity_left[0] /= self.n_outputs
+        impurity_right[0] /= self.n_outputs
+
+

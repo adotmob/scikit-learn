@@ -17,6 +17,7 @@
 
 from ._criterion cimport Criterion
 
+
 from libc.stdlib cimport free
 from libc.stdlib cimport qsort
 from libc.string cimport memcpy
